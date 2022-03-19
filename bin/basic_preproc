@@ -1,0 +1,218 @@
+#!/usr/bin/env perl
+# basic_preproc [-o outfile] inputfile [... inputfile]
+
+# lines starting with numbers are BASIC code
+# lines starting with '#include' include files at the current point
+# lines starting with '#const' introduce substitution values
+# lines starting with a single-quote are ignores (treated as comments)
+# duplicate line numbers are reported (original & current file & line nos) and cause a non-zero exit code
+# substitutions are carried out only in BASIC lines and #const values
+
+use 5.30.0;
+
+use warnings FATAL => 'all';
+use Getopt::Long;
+
+my $outputFilename;
+
+GetOptions(
+    "output=s" => \$outputFilename,
+) or die("Error in command line arguments\n");
+
+my $fh;
+if ($outputFilename)
+{
+    open $fh, ">", $outputFilename or die "Unable to open $outputFilename for writing: $!\n";
+}
+$fh = *STDOUT unless $fh;
+
+my $errorCount = 0;
+my %includedFiles;
+my %basicLine;
+my %const;
+
+my @lineMatches = (
+    { regexp => qr/^(?:'.*|)$/, code => \&ignoreLine },
+    { regexp => qr/^\d/a,       code => \&code },
+    { regexp => qr/^#/,         code => \&preprocessor },
+    { regexp => qr/./,          code => \&invalidLine },
+);
+my $varMatch = qr/[a-z][a-z0-9_\.]*/i;
+
+for my $f ( @ARGV )
+{
+    loadBasic($f);
+}
+
+if (!$errorCount)
+{
+    my $output = '';
+    for my $codeLineNo ( sort { $a <=> $b } keys %basicLine )
+    {
+        $output .= $codeLineNo . " " . $basicLine{$codeLineNo}{text} . "\n";
+    }
+    say $fh $output;
+}
+
+exit ($errorCount ? 1 : 0);
+
+#-----------------
+
+sub loadBasic
+{
+    my ($filename) = @_;
+
+    return if (exists $includedFiles{$filename});
+
+    my $fh = openFile( $filename );
+    return if !defined $fh;
+
+    my $fileLine = 0;
+    for my $line (<$fh>)
+    {
+        ++$fileLine;
+
+        $line =~ s/^\s+|\s+$//;
+
+        my $matched = 0;
+        for my $match ( @lineMatches )
+        {
+            if ($line =~ m/$match->{regexp}/)
+            {
+                $match->{code}->($filename, $fileLine, $line);
+                $matched = 1;
+                last;
+            }
+        }
+        if (!$matched)
+        {
+            say STDERR "ERROR: $filename/$fileLine Unknown line type: $line";
+            ++$errorCount;
+        }
+    }
+}
+
+sub loadSymbols
+{
+    my ($filename, $param) = @_;
+
+    return if (exists $includedFiles{$filename});
+
+    my $fh = openFile( $filename );
+    return if !defined $fh;
+
+    my $fileLine = 0;
+    my @scope;
+    push @scope, $param if defined $param;
+    for my $line (<$fh>)
+    {
+        ++$fileLine;
+
+        $line =~ s/^\s+|\s+$//;
+
+        if ($line =~ m/^\.namespace ($varMatch) \{$/i)
+        {
+            push @scope, $1
+        }
+        elsif ($line =~ m/^\.label ($varMatch)=\$([0-9a-f]*)( \{)?$/i)
+        {
+            my $name = join(".", @scope, $1);
+            $const{$name} = { filename => $filename, fileLine => $fileLine, value => hex($2) };
+            push @scope, $1 if defined $3;
+        }
+        elsif ($line eq '}')
+        {
+            pop @scope;
+        }
+        else
+        {
+            say STDERR "ERROR: $filename/$fileLine Unknown line type: $line";
+            ++$errorCount;
+        }
+    }
+}
+
+sub openFile
+{
+    my ($filename) = @_;
+    my $failed = 0;
+    open my $fh, "<", $filename or $failed = 1;
+    if ($failed)
+    {
+        say STDERR "Unable to open file $filename $!";
+        ++$errorCount;
+        return undef;
+    }
+    return $fh;
+}
+
+sub ignoreLine { }
+
+sub preprocessor
+{
+    my ($filename, $fileLine, $line) = @_;
+
+    if ($line =~ m/^#\s*import\s+([^,]+?)(?:\s*,\s*($varMatch))?$/i)
+    {
+        my $importFilename = $1;
+        my $param = $2;
+        if ($importFilename =~ m/\.sym$/i)
+        {
+            loadSymbols($importFilename, $param);
+        }
+        else
+        {
+            loadBasic($importFilename);
+        }
+    }
+    elsif ($line =~ m/^#\s*const\s+($varMatch)\s+(.*)/i)
+    {
+        if (exists $const{$1})
+        {
+            say STDERR "ERROR: $filename/$fileLine Constant already used in $const{$1}{filename}/$const{$1}{fileLine}";
+            ++$errorCount;
+        }
+        else
+        {
+            my $key = $1;
+            my $value = $2;
+            $value =~ s( \{\{ \s* ( $varMatch ) \s* \}\} )($const{$1}{value} // "")ixeg;
+            $const{$key} = { filename => $filename, fileLine => $fileLine, value => $value };
+        }
+    }
+    else
+    {
+        say STDERR "ERROR: $filename/$fileLine Invalid or malformed directive: $line";
+        ++$errorCount;
+    }
+}
+
+sub code
+{
+    my ($filename, $fileLine, $line) = @_;
+
+    my ($codeLineNo, $codeText) = ( $line =~ m/^(\d+)\s*(.*)/ );
+
+    if (exists $basicLine{$codeLineNo})
+    {
+        say STDERR "ERROR: $filename/$fileLine Line number already used in $basicLine{$codeLineNo}{filename}/$basicLine{$codeLineNo}{fileLine}";
+        ++$errorCount;
+    }
+    elsif ($codeText eq '')
+    {
+        say STDERR "ERROR: $filename/$fileLine Line number without code";
+        ++$errorCount;
+    }
+    else
+    {
+        $codeText =~ s( \{\{ \s* ( $varMatch ) \s* \}\} )($const{$1}{value} // "")ixeg;
+        $basicLine{$codeLineNo} = { filename => $filename, fileLine => $fileLine, text => $codeText, lineno => $codeLineNo };
+    }
+}
+
+sub invalidLine
+{
+    my ($filename, $fileLine, $line) = @_;
+    say STDERR "ERROR: $filename/$fileLine Invalid line : $line";
+    ++$errorCount;
+}

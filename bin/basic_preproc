@@ -72,7 +72,7 @@ sub loadBasic
     {
         ++$fileLine;
 
-        $line =~ s/^\s+|\s+$//;
+        $line =~ s/^\s+|\s+$//g;
 
         my $matched = 0;
         for my $match ( @lineMatches )
@@ -108,11 +108,11 @@ sub loadSymbols
     {
         ++$fileLine;
 
-        $line =~ s/^\s+|\s+$//;
+        $line =~ s/^\s+|\s+$//g;
 
         if ($line =~ m/^\.namespace ($varMatch) \{$/i)
         {
-            push @scope, $1
+            push @scope, $1;
         }
         elsif ($line =~ m/^\.label ($varMatch)=\$([0-9a-f]*)( \{)?$/i)
         {

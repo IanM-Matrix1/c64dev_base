@@ -264,9 +264,10 @@ sub invalidLine
     ++$errorCount;
 }
 
-package retokenise
+package tokenise
 {
     use Class::Tiny;
+    use List::MoreUtils qw(uniq);
 
     my %tokenType;
     my %tokenMap;
@@ -384,7 +385,6 @@ package retokenise
             '/'         => { type => "OP" },
             '*'         => { type => "OP" },
             '^'         => { type => "OP" },
-            '**'        => { type => "OP", remap => '^' },
             '('         => { type => "OP" },
             ')'         => { type => "OP" },
 
@@ -399,15 +399,18 @@ package retokenise
     sub BUILD {
         my ($self, $args) = @_;
 
-        $self->{tokenType} = \%tokenType;
-        $self->{tokenMap} = \%tokenMap;
+        $self->{baseTokenType} = \%tokenType;
+        $self->{baseTokenMap}  = \%tokenMap;
+        $self->{userTokenType} = {};
+        $self->{userTokenMap}  = {};
     }
 
     sub getTokenMapRegex {
         my ($self) = @_;
         if (!defined $self->{regex})
         {
-            my @tokenSorted = sort { length($b) <=> length($a) or $a cmp $b } keys %{$self->{tokenMap}};
+            my @keywords = uniq(keys %{$self->{baseTokenMap}}, keys %{$self->{userTokenMap}});
+            my @tokenSorted = sort { length($b) <=> length($a) or $a cmp $b } @keywords;
             @tokenSorted = map { quotemeta($_) } @tokenSorted;
             $self->{regex} = join '|', @tokenSorted;
         }
@@ -418,27 +421,21 @@ package retokenise
     {
         my ($self, $token, $type, $remap) = @_;
 
-        $self->{tokenMap}{$token} = { type => $type };
-        $self->{tokenMap}{$token}{remap} = $remap if defined $remap && $remap ne '';
+        $self->{userTokenMap}{$token} = { type => $type };
+        $self->{userTokenMap}{$token}{remap} = $remap if defined $remap && $remap ne '';
         delete $self->{regex};
     }
 
     sub addTokenType
     {
         my ($self, $type, $desc) = @_;
-        $self->{$type} = $desc;
+        $self->{userTokenType}{$type} = $desc;
     }
 
-    sub joinTokens
+    sub getTokenMapping
     {
-        my ($self, $first, $second) = @_;
-
-        # TODO: simple rules for now - replace with a better mechanism
-        return $first if !defined $second || $second eq '';
-        return $second if !defined $first || $first eq '';
-        return $first . " " . $second if ($first =~ m/[0-9]$/ && $second =~ m/^[0-9]/);
-        return $first . " " . $second if ($first =~ m/[a-z]$/ && $second =~ m/^[a-z]/);
-        return $first . $second;
+        my ($self, $keyword) = @_;
+        return $self->{userTokenMap}{$keyword} // $self->{baseTokenMap}{$keyword} // undef; 
     }
 
     sub getToken {
@@ -459,10 +456,11 @@ package retokenise
         }
         elsif ($in =~ s/^($tokenMatch)//)
         {
+            my $detail = $self->getTokenMapping($1);
             $return = {
-                type => $tokenMap{$1}{type},
+                type => $detail->{type},
                 value => $1,
-                remap => $tokenMap{$1}{remap} // $1
+                remap => $detail->{remap} // $1
             }
         }
         elsif ($in =~ s/^([a-z][a-z0-9]*\$?)//)
@@ -505,28 +503,75 @@ package retokenise
         return ($in, $return);
     }
 
+    sub getAllTokens
+    {
+        my ($self, $codeText) = @_;
+
+        my @tokenList;
+        my $result;
+
+        while ($codeText ne "")
+        {
+            ($codeText, $result) = $self->getToken($codeText);
+
+            last if (!defined $result);
+            push @tokenList, $result if ($result->{type} ne 'EOL');
+        }
+
+        return ($codeText, @tokenList);
+    }
+};
+
+package retokenise
+{
+    use Class::Tiny;
+
+    sub BUILD {
+        my ($self, $args) = @_;
+
+        $self->{tokenise} = tokenise->new();
+    }
+
     sub retokenise
     {
         my ($self, $codeLineNo, $detail) = @_;
 
-        my $in = $detail->{text};
-        my $out = "";
+        my $tokenise = $self->{tokenise};
+        my ($leftover, @tokenList) = $tokenise->getAllTokens( $detail->{text} );
 
-        my $result;
-        while ($in ne "")
+        if ($leftover)
         {
-            ($in, $result) = $self->getToken($in);
-            if (!defined $result)
-            {
-                say "Failed to parse next token in code line $codeLineNo: $in";
+            say "Failed to parse next token in code line $codeLineNo: $leftover";
                 $errorCount++;
             }
             else
             {
-                $out = $self->joinTokens($out, $result->{remap}) if $result->{type} ne 'EOL';
+            my $out = "";
+            for my $token (@tokenList)
+            {
+                $out = $self->joinTokens($out, $token->{remap});
+            }
+            $detail->{tokenised_text} = $self->joinTokens($codeLineNo, $out);
             }
         }
 
-        $detail->{tokenised_text} = $self->joinTokens($codeLineNo, $out);
+    sub joinTokens
+    {
+        my ($self, $first, $second) = @_;
+
+        # TODO: simple rules for now - replace with a better mechanism
+        return $first if !defined $second || $second eq '';
+        return $second if !defined $first || $first eq '';
+        return $first . " " . $second if ($first =~ m/[0-9]$/ && $second =~ m/^[0-9]/);
+        return $first . " " . $second if ($first =~ m/[a-z]$/ && $second =~ m/^[a-z]/);
+        return $first . $second;
+    }
+
+    sub addTokenMapping
+    {
+        my ($self, $token, $type, $remap) = @_;
+
+        my $tokenise = $self->{tokenise};
+        return $tokenise->addTokenMapping($token, $type, $remap);
     }
 };

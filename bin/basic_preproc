@@ -4,9 +4,11 @@
 # lines starting with numbers are BASIC code
 # lines starting with '#include' include files at the current point
 # lines starting with '#const' introduce substitution values
+# lines starting with '#map' introduce token substitutions
 # lines starting with a single-quote are ignores (treated as comments)
 # duplicate line numbers are reported (original & current file & line nos) and cause a non-zero exit code
 # substitutions are carried out only in BASIC lines and #const values
+# BASIC lines are tokenised & repacked to remove unnecessary spaces
 
 use 5.30.0;
 
@@ -30,15 +32,19 @@ my $errorCount = 0;
 my %includedFiles;
 my %basicLine;
 my %const;
+my %maps;
 
 my @lineMatches = (
     { regexp => qr/^(?:'.*|)$/,     code => \&ignoreLine },
     { regexp => qr/^\d/a,           code => \&codeLine },
     { regexp => qr/^#\s*import/,    code => \&preprocessorImport },
     { regexp => qr/^#\s*const/,     code => \&preprocessorConst },
+    { regexp => qr/^#\s*map/,       code => \&preprocessorMap },
     { regexp => qr/./,              code => \&invalidLine },
 );
 my $varMatch = qr/[a-z][a-z0-9_\.]*/i;
+
+my $tk = retokenise->new();
 
 for my $f ( @ARGV )
 {
@@ -50,7 +56,8 @@ if (!$errorCount)
     my $output = '';
     for my $codeLineNo ( sort { $a <=> $b } keys %basicLine )
     {
-        $output .= $codeLineNo . " " . $basicLine{$codeLineNo}{text} . "\n";
+        $tk->retokenise($codeLineNo, $basicLine{$codeLineNo});
+        $output .= $basicLine{$codeLineNo}{tokenised_text} . "\n";
     }
     say $fh $output;
 }
@@ -199,6 +206,34 @@ sub preprocessorConst
     }
 }
 
+sub preprocessorMap
+{
+    my ($filename, $fileLine, $line) = @_;
+
+    # TODO: Allow optional 3rd arg to specify the type
+    if ($line =~ m/^#\s*map\s+(\S+)\s+(\S*)\s*$/i)
+    {
+        if (exists $maps{$1})
+        {
+            say STDERR "ERROR: $filename/$fileLine Map already set in $maps{$1}{filename}/$maps{$1}{fileLine}";
+            ++$errorCount;
+        }
+        else
+        {
+            my $key = $1;
+            my $value = $2;
+            $value =~ s( \{\{ \s* ( $varMatch ) \s* \}\} )($maps{$1}{value} // "")ixeg;
+            $maps{$key} = { filename => $filename, fileLine => $fileLine, value => $value };
+            $tk->addTokenMapping( $key, 'REMAP', $value );
+        }
+    }
+    else
+    {
+        say STDERR "ERROR: $filename/$fileLine Invalid or malformed map directive: $line";
+        ++$errorCount;
+    }
+}
+
 sub codeLine
 {
     my ($filename, $fileLine, $line) = @_;
@@ -228,3 +263,270 @@ sub invalidLine
     say STDERR "ERROR: $filename/$fileLine Invalid line : $line";
     ++$errorCount;
 }
+
+package retokenise
+{
+    use Class::Tiny;
+
+    my %tokenType;
+    my %tokenMap;
+
+    BEGIN {
+        %tokenType = (
+            "TODO"      => 'not impl',
+            "FUNC"      => 'function',
+            "OP"        => 'operator',
+            "CMD"       => ' command',
+            "VAR"       => 'variable',
+            "PUNCT"     => '   punct',
+            "REMAP"     => '   remap',
+            "OTHER"     => ' unknown',
+            "NUMBER"    => '  number',
+            "STRING"    => '  string',
+            "SPECIAL"   => ' special',
+        );
+
+        %tokenMap = (
+            'abs'       => { type => "FUNC" },
+            'and'       => { type => "OP" },
+            'asc'       => { type => "FUNC" },
+            'atn'       => { type => "FUNC" },
+            'chr$'      => { type => "FUNC" },
+            'close'     => { type => "CMD" },
+            'clr'       => { type => "CMD" },
+            'cmd'       => { type => "CMD" },
+            'cont'      => { type => "CMD" },
+            'cos'       => { type => "FUNC" },
+            'data'      => { type => "CMD" },
+            'def'       => { type => "CMD" },
+            'dim'       => { type => "CMD" },
+            'end'       => { type => "CMD" },
+            'exp'       => { type => "FUNC" },
+            'fn'        => { type => "CMD" },
+            'for'       => { type => "CMD" },
+            'fre'       => { type => "FUNC" },
+            'get'       => { type => "CMD" },
+            'get#'      => { type => "CMD" },
+            'gosub'     => { type => "CMD" },
+            'goto'      => { type => "CMD" },
+            'if'        => { type => "CMD" },
+            'input'     => { type => "CMD" },
+            'input#'    => { type => "CMD" },
+            'int'       => { type => "FUNC" },
+            'left$'     => { type => "FUNC" },
+            'len'       => { type => "FUNC" },
+            'let'       => { type => "CMD" },
+            'list'      => { type => "CMD" },
+            'load'      => { type => "CMD" },
+            'log'       => { type => "FUNC" },
+            'mid$'      => { type => "FUNC" },
+            'new'       => { type => "CMD" },
+            'next'      => { type => "CMD" },
+            'not'       => { type => "OP" },
+            'on'        => { type => "CMD" },
+            'open'      => { type => "CMD" },
+            'or'        => { type => "OP" },
+            'peek'      => { type => "FUNC" },
+            'poke'      => { type => "CMD" },
+            'pos'       => { type => "FUNC" },
+            'print'     => { type => "CMD" },
+            '?'         => { type => "CMD", remap => 'print' },
+            'print#'    => { type => "CMD" },
+            'read'      => { type => "CMD" },
+            'rem'       => { type => "CMD" },
+            'restore'   => { type => "CMD" },
+            'return'    => { type => "CMD" },
+            'right'     => { type => "FUNC" },
+            'rnd'       => { type => "FUNC" },
+            'run'       => { type => "CMD" },
+            'save'      => { type => "CMD" },
+            'sgn'       => { type => "FUNC" },
+            'sin'       => { type => "FUNC" },
+            'spc'       => { type => "FUNC" },
+            'sqr'       => { type => "FUNC" },
+            'step'      => { type => "CMD" },
+            'stop'      => { type => "CMD" },
+            'str$'      => { type => "FUNC" },
+            'sys'       => { type => "CMD" },
+            'tab'       => { type => "FUNC" },
+            'tan'       => { type => "FUNC" },
+            'then'      => { type => "CMD" },
+            'to'        => { type => "CMD" },
+            'usr'       => { type => "FUNC" },
+            'val'       => { type => "FUNC" },
+            'verify'    => { type => "CMD" },
+            'wait'      => { type => "CMD" },
+
+            # Special variable handling
+            'status'    => { type => "VAR", remap => 'st' },
+            'statu'     => { type => "VAR", remap => 'st' },
+            'stat'      => { type => "VAR", remap => 'st' },
+            'sta'       => { type => "VAR", remap => 'st' },
+            'st'        => { type => "VAR", remap => 'st' },
+
+            'time'      => { type => "VAR", remap => 'ti' },
+            'tim'       => { type => "VAR", remap => 'ti' },
+            'ti'        => { type => "VAR", remap => 'ti' },
+
+            'time$'     => { type => "VAR", remap => 'ti$' },
+            'tim$'      => { type => "VAR", remap => 'ti$' },
+            'ti$'       => { type => "VAR", remap => 'ti$' },
+
+            # Operators
+            '='         => { type => "OP" },
+            '<'         => { type => "OP" },
+            '<='        => { type => "OP" },
+            '<>'        => { type => "OP" },
+            '>'         => { type => "OP" },
+            '>='        => { type => "OP" },
+            '+'         => { type => "OP" },
+            '-'         => { type => "OP" },
+            '/'         => { type => "OP" },
+            '*'         => { type => "OP" },
+            '^'         => { type => "OP" },
+            '**'        => { type => "OP", remap => '^' },
+            '('         => { type => "OP" },
+            ')'         => { type => "OP" },
+
+            # Punctuation
+            ','         => { type => 'PUNCT' },
+            ':'         => { type => 'PUNCT' },
+            ';'         => { type => 'PUNCT' },
+
+        );
+    }
+
+    sub BUILD {
+        my ($self, $args) = @_;
+
+        $self->{tokenType} = \%tokenType;
+        $self->{tokenMap} = \%tokenMap;
+    }
+
+    sub getTokenMapRegex {
+        my ($self) = @_;
+        if (!defined $self->{regex})
+        {
+            my @tokenSorted = sort { length($b) <=> length($a) or $a cmp $b } keys %{$self->{tokenMap}};
+            @tokenSorted = map { quotemeta($_) } @tokenSorted;
+            $self->{regex} = join '|', @tokenSorted;
+        }
+        return $self->{regex};
+    }
+
+    sub addTokenMapping
+    {
+        my ($self, $token, $type, $remap) = @_;
+
+        $self->{tokenMap}{$token} = { type => $type };
+        $self->{tokenMap}{$token}{remap} = $remap if defined $remap && $remap ne '';
+        delete $self->{regex};
+    }
+
+    sub addTokenType
+    {
+        my ($self, $type, $desc) = @_;
+        $self->{$type} = $desc;
+    }
+
+    sub joinTokens
+    {
+        my ($self, $first, $second) = @_;
+
+        # TODO: simple rules for now - replace with a better mechanism
+        return $first if !defined $second || $second eq '';
+        return $second if !defined $first || $first eq '';
+        return $first . " " . $second if ($first =~ m/[0-9]$/ && $second =~ m/^[0-9]/);
+        return $first . " " . $second if ($first =~ m/[a-z]$/ && $second =~ m/^[a-z]/);
+        return $first . $second;
+    }
+
+    sub getToken {
+        my ($self, $in) = @_;
+
+        my $tokenMatch = $self->getTokenMapRegex();
+        my $return;
+
+        $in =~ s/^\s+//;
+
+        if ($in eq '')
+        {
+            $return = {
+                type => 'EOL',
+                value => '',
+                remap => ''
+            }
+        }
+        elsif ($in =~ s/^($tokenMatch)//)
+        {
+            $return = {
+                type => $tokenMap{$1}{type},
+                value => $1,
+                remap => $tokenMap{$1}{remap} // $1
+            }
+        }
+        elsif ($in =~ s/^([a-z][a-z0-9]*\$?)//)
+        {
+            $return = {
+                type => 'VAR',
+                value => $1,
+                remap => $1
+            }
+        }
+        elsif ($in =~ s/^([0-9]\.?[0-9]*|\.[0-9]*)//)
+        {
+            $return = {
+                type => 'NUMBER',
+                value => $1,
+                remap => $1
+            }
+        }
+        elsif ($in =~ s/^"([^"]*)"?//)
+        {
+            $return = {
+                type => 'STRING',
+                value => qq/"$1"/,
+                remap => qq/"$1"/
+            }
+        }
+        elsif ($in =~ s/^(\@[\@a-z])//)
+        {
+            $return = {
+                type => 'SPECIAL',
+                value => $1,
+                remap => $1
+            }
+        }
+        else
+        {
+            $return = undef;
+        }
+
+        return ($in, $return);
+    }
+
+    sub retokenise
+    {
+        my ($self, $codeLineNo, $detail) = @_;
+
+        my $in = $detail->{text};
+        my $out = "";
+
+        my $result;
+        while ($in ne "")
+        {
+            ($in, $result) = $self->getToken($in);
+            if (!defined $result)
+            {
+                say "Failed to parse next token in code line $codeLineNo: $in";
+                $errorCount++;
+            }
+            else
+            {
+                $out = $self->joinTokens($out, $result->{remap}) if $result->{type} ne 'EOL';
+            }
+        }
+
+        $detail->{tokenised_text} = $self->joinTokens($codeLineNo, $out);
+    }
+};

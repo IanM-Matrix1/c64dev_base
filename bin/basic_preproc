@@ -32,10 +32,11 @@ my %basicLine;
 my %const;
 
 my @lineMatches = (
-    { regexp => qr/^(?:'.*|)$/, code => \&ignoreLine },
-    { regexp => qr/^\d/a,       code => \&code },
-    { regexp => qr/^#/,         code => \&preprocessor },
-    { regexp => qr/./,          code => \&invalidLine },
+    { regexp => qr/^(?:'.*|)$/,     code => \&ignoreLine },
+    { regexp => qr/^\d/a,           code => \&codeLine },
+    { regexp => qr/^#\s*import/,    code => \&preprocessorImport },
+    { regexp => qr/^#\s*const/,     code => \&preprocessorConst },
+    { regexp => qr/./,              code => \&invalidLine },
 );
 my $varMatch = qr/[a-z][a-z0-9_\.]*/i;
 
@@ -148,7 +149,7 @@ sub openFile
 
 sub ignoreLine { }
 
-sub preprocessor
+sub preprocessorImport
 {
     my ($filename, $fileLine, $line) = @_;
 
@@ -165,7 +166,18 @@ sub preprocessor
             loadBasic($importFilename);
         }
     }
-    elsif ($line =~ m/^#\s*const\s+($varMatch)\s+(.*)/i)
+    else
+    {
+        say STDERR "ERROR: $filename/$fileLine Invalid or malformed import directive: $line";
+        ++$errorCount;
+    }
+}
+
+sub preprocessorConst
+{
+    my ($filename, $fileLine, $line) = @_;
+
+    if ($line =~ m/^#\s*const\s+($varMatch)\s+(.*)/i)
     {
         if (exists $const{$1})
         {
@@ -182,12 +194,12 @@ sub preprocessor
     }
     else
     {
-        say STDERR "ERROR: $filename/$fileLine Invalid or malformed directive: $line";
+        say STDERR "ERROR: $filename/$fileLine Invalid or malformed const directive: $line";
         ++$errorCount;
     }
 }
 
-sub code
+sub codeLine
 {
     my ($filename, $fileLine, $line) = @_;
 
